@@ -118,6 +118,7 @@ label.f{display:block;font-size:13px;font-weight:700;margin:12px 0 6px}
 .pbar{margin-bottom:12px}.pbar .ph{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:4px}.pbar .tr{height:10px;border-radius:999px;background:#eef2f7;overflow:hidden}.pbar .tr i{display:block;height:100%;border-radius:999px}
 .ringw{display:flex;align-items:center;gap:14px}
 .camwrap{position:relative;background:#0f172a;border-radius:24px;overflow:hidden;aspect-ratio:3/4;max-width:340px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center}
+.facehint{max-width:340px;margin:0 auto 10px;padding:8px 12px;border-radius:14px;font-size:13px;font-weight:700;text-align:center}.facehint.ok{background:#dcfce7;color:#166534}.facehint.bad{background:#fee2e2;color:#991b1b}
 .camwrap video,.camwrap img{width:100%;height:100%;object-fit:cover}.camwrap video{transform:scaleX(-1)}
 .camph{position:absolute;color:#94a3b8;text-align:center;font-size:13px}.camph svg{width:42px;height:42px}
 .loc{display:flex;gap:12px;align-items:center;padding:12px;border-radius:16px;background:#f8fafc;margin-bottom:10px}
@@ -804,13 +805,51 @@ async function startCam() {
   stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 960 } }, audio: false });
   const v = $('#cam'); v.srcObject = stream; await v.play();
 }
-function stopCam() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
-function snapPhoto() {
+function stopCam() { faceStop(); if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
+/* ---- deteksi wajah (MediaPipe Face Detector, berjalan di perangkat) ---- */
+const MP_VER = '0.10.14', MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
+const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
+let faceDet = null, faceLoading = null, faceTimer = 0, faceOk = false;
+function loadFace() {
+  if (faceDet) return Promise.resolve(faceDet);
+  if (!faceLoading) faceLoading = (async () => {
+    const m = await import(`${MP_BASE}/vision_bundle.mjs`), fs = await m.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    const mk = delegate => m.FaceDetector.createFromOptions(fs, { baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: 'IMAGE', minDetectionConfidence: 0.6 });
+    try { faceDet = await mk('GPU'); } catch (e) { faceDet = await mk('CPU'); }
+    return faceDet;
+  })().catch(e => { faceLoading = null; throw new Error('Pendeteksi wajah gagal dimuat. Periksa koneksi internet lalu coba lagi.'); });
+  return faceLoading;
+}
+// jumlah wajah yang jelas terlihat (cukup besar & yakin) pada video/kanvas
+function countFaces(src) {
+  const W = src.videoWidth || src.width, r = faceDet.detect(src);
+  return (r.detections || []).filter(d => (d.categories?.[0]?.score ?? 1) >= 0.6 && d.boundingBox && d.boundingBox.width >= W * 0.18).length;
+}
+const FACE_MSG = { 0: 'Wajah tidak terdeteksi. Hadapkan wajah ke kamera, pastikan cahaya cukup, lalu ambil foto ulang.', 2: 'Terdeteksi lebih dari satu wajah. Foto selfie harus hanya berisi wajah Anda.' };
+function faceStop() { clearTimeout(faceTimer); faceTimer = 0; }
+function faceWatch() {   // pantau wajah selama kamera aktif, tombol Ambil Foto aktif hanya bila ada wajah
+  faceStop();
+  const loop = () => {
+    const v = $('#cam'), hint = $('#faceHint'), btn = $('#btnSnap');
+    if (!stream || !v || v.hidden || !hint) return;
+    let n = 0; try { n = v.videoWidth ? countFaces(v) : 0; } catch (e) { n = 0; }
+    faceOk = n === 1;
+    hint.className = 'facehint ' + (faceOk ? 'ok' : 'bad'); hint.textContent = faceOk ? 'Wajah terdeteksi. Silakan ambil foto.' : (n > 1 ? FACE_MSG[2] : 'Wajah belum terdeteksi. Hadapkan wajah ke kamera.');
+    if (btn) btn.disabled = !faceOk;
+    faceTimer = setTimeout(loop, 500);
+  };
+  loop();
+}
+function grabFrame() {
   const v = $('#cam'); if (!v.videoWidth) throw new Error('Kamera belum siap.');
   const w = 480, h = Math.round(w * v.videoHeight / v.videoWidth);
   const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d');
   x.translate(w, 0); x.scale(-1, 1); x.drawImage(v, 0, 0, w, h); x.setTransform(1, 0, 0, 1, 0, 0);
-  const d = new Date(); x.fillStyle = 'rgba(0,0,0,.5)'; x.fillRect(0, h - 28, w, 28); x.fillStyle = '#fff'; x.font = '13px sans-serif';
+  return c;
+}
+function stampPhoto(c) {
+  const x = c.getContext('2d'), w = c.width, h = c.height, d = new Date();
+  x.fillStyle = 'rgba(0,0,0,.5)'; x.fillRect(0, h - 28, w, 28); x.fillStyle = '#fff'; x.font = '13px sans-serif';
   x.fillText(`${S.user.nama} · ${ymd(d)} ${hm(d)}`, 8, h - 10);
   return c.toDataURL('image/jpeg', 0.6);
 }
@@ -1001,6 +1040,7 @@ PAGES.guru.absen = async () => {
       : `<div class="card pad"><h3 style="margin-bottom:10px">1. Lokasi</h3><div class="loc ok">${ic(MODE_ICON[emode])}<div><b>${esc(MODE_LABEL[emode])}</b><div class="sm">Lokasi dimatikan, Anda dapat absen dari mana saja.</div></div></div></div>`}
   <div class="card pad"><h3 style="margin-bottom:10px">2. Foto Selfie</h3>
     <div class="camwrap"><video id="cam" playsinline muted hidden></video><img id="shot" alt="Hasil selfie" hidden><div class="camph" id="camPh">${ic('camera')}<div>Kamera belum aktif</div></div></div>
+    <div id="faceHint" class="facehint" hidden></div>
     <div id="camBtns"></div></div>
   <button class="btn pri block lg" id="btnSend" data-act="sendAbsen" disabled>${ic('check')} Kirim Absen ${mode === 'masuk' ? 'Masuk' : 'Pulang'}</button>`;
   camUI('idle');
@@ -1019,7 +1059,8 @@ PAGES.guru.absen = async () => {
 function camUI(st) {
   const b = $('#camBtns'); if (!b) return;
   $('#cam').hidden = st !== 'live'; $('#shot').hidden = st !== 'done'; $('#camPh').hidden = st !== 'idle';
-  b.innerHTML = st === 'live' ? `<button class="btn pri block" data-act="camSnap">${ic('camera')} Ambil Foto</button>`
+  const fh = $('#faceHint'); if (fh) fh.hidden = st !== 'live';
+  b.innerHTML = st === 'live' ? `<button class="btn pri block" id="btnSnap" data-act="camSnap" disabled>${ic('camera')} Ambil Foto</button>`
     : st === 'done' ? `<button class="btn block" data-act="camOpen">${ic('refresh')} Ulangi Foto</button>`
       : `<button class="btn pri block" data-act="camOpen">${ic('camera')} Buka Kamera</button>`;
 }
@@ -1030,10 +1071,16 @@ function updateSend() {
 }
 actions.camOpen = async () => {
   A.foto = null; updateSend();
-  try { await startCam(); camUI('live'); }
-  catch (e) { camUI('idle'); toast(e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Aktifkan izin kamera di browser.' : errMsg(e), 'err'); }
+  try {
+    $('#camBtns').innerHTML = `<div class="loc"><div class="spin" style="width:24px;height:24px;border-width:3px"></div><div>Menyiapkan pendeteksi wajah…</div></div>`;
+    await loadFace(); await startCam(); camUI('live'); faceWatch();
+  } catch (e) { camUI('idle'); toast(e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Aktifkan izin kamera di browser.' : errMsg(e), 'err'); }
 };
-actions.camSnap = () => { A.foto = snapPhoto(); $('#shot').src = A.foto; stopCam(); camUI('done'); updateSend(); };
+actions.camSnap = () => {
+  let c, n; try { c = grabFrame(); n = countFaces(c); } catch (e) { return toast(errMsg(e), 'err'); }
+  if (n !== 1) { const h = $('#faceHint'); if (h) { h.className = 'facehint bad'; h.textContent = FACE_MSG[n > 1 ? 2 : 0]; } return toast(FACE_MSG[n > 1 ? 2 : 0], 'err'); }   // kamera tetap menyala untuk foto ulang
+  A.foto = stampPhoto(c); $('#shot').src = A.foto; stopCam(); camUI('done'); updateSend();
+};
 actions.getLoc = async () => {
   const box = $('#locBox'); if (!box) return;
   box.innerHTML = `<div class="loc"><div class="spin" style="width:24px;height:24px;border-width:3px"></div><div>Mencari lokasi…</div></div>`;
