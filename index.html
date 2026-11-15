@@ -337,6 +337,9 @@ async function compressFile(file, max, q, png, square) {
     return out;
   } finally { URL.revokeObjectURL(url); }
 }
+// username: huruf kecil, angka, titik, strip, garis bawah, dan satu @ (boleh berupa email). Karakter lain dibuang.
+const normUser = s => String(s ?? '').trim().toLowerCase().replace(/[^a-z0-9._@-]/g, '');
+const USER_RE = /^(?=.{3,60}$)[a-z0-9._-]+(@[a-z0-9._-]+)?$/;
 function download(name, text, type = 'text/csv;charset=utf-8') {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + text], { type })); a.download = name; document.body.appendChild(a); a.click(); a.remove();
 }
@@ -774,7 +777,7 @@ actions.loginRole = t => {
   $('#fGuru').hidden = a; $('#fAdmin').hidden = !a;
 };
 forms.loginGuru = async f => {
-  const u = f.username.value.trim().toLowerCase(), p = f.password.value;
+  const u = normUser(f.username.value), p = f.password.value;
   busy(true);
   try {
     const user = await DB.getUser(u);
@@ -1603,7 +1606,7 @@ PAGES.admin.guru = async () => {
   const v = $('#view'); v.innerHTML = loading();
   const users = (await DB.listUsers()).sort((a, b) => a.nama.localeCompare(b.nama)); S.guruList = users;
   v.innerHTML = `${head('Data Guru', `${users.length} akun terdaftar`)}
-  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"><button class="btn pri" data-act="guruAdd">${ic('plus')} Tambah Guru</button><label class="btn" style="cursor:pointer">${ic('upload')} Impor CSV<input type="file" accept=".csv,text/csv,text/plain" data-change="csvImport" hidden></label><button class="btn" data-act="csvTemplate">${ic('download')} Template CSV</button></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"><button class="btn pri" data-act="guruAdd">${ic('plus')} Tambah Guru</button><label class="btn" style="cursor:pointer">${ic('upload')} Impor Excel / CSV<input type="file" accept=".xlsx,.xls,.csv,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" data-change="csvImport" hidden></label><button class="btn" data-act="csvTemplate">${ic('download')} Template Excel</button></div>
   <input class="inp" id="guruQ" placeholder="Cari nama atau username…" style="margin-bottom:12px">
   <div class="card" id="guruList"></div>`;
   const draw = () => {
@@ -1614,14 +1617,14 @@ PAGES.admin.guru = async () => {
   $('#guruQ').addEventListener('input', draw); draw();
 };
 actions.guruAdd = () => modal('Tambah Guru', `<form data-form="guruNew">
-  <label class="f">Username (huruf kecil, angka, titik, strip)</label><input class="inp" name="username" pattern="[a-z0-9._\\-]{3,30}" autocapitalize="none" required>
+  <label class="f">Username (huruf kecil, angka, titik, strip; boleh berupa email)</label><input class="inp" name="username" autocapitalize="none" required>
   <label class="f">Nama lengkap</label><input class="inp" name="nama" required>
   <label class="f">NIP (opsional)</label><input class="inp" name="nip" inputmode="numeric">
   <label class="f">Password awal (min. 6 karakter)</label><input class="inp" name="password" minlength="6" required>
   <button class="btn pri block lg" style="margin-top:16px">Simpan</button></form>`);
 forms.guruNew = async f => {
-  const u = f.username.value.trim().toLowerCase();
-  if (!/^[a-z0-9._-]{3,30}$/.test(u)) return toast('Username tidak valid.', 'err');
+  const u = normUser(f.username.value);
+  if (!USER_RE.test(u)) return toast('Username tidak valid (3-60 karakter: huruf kecil, angka, titik, strip, dan satu @).', 'err');
   busy(true);
   try {
     if (await DB.getUser(u)) throw new Error('Username sudah dipakai.');
@@ -1655,24 +1658,65 @@ actions.guruDel = async t => {
   busy(true); try { await DB.deleteUser(t.dataset.u); } finally { busy(false); }
   toast('Akun dihapus.'); go('guru');
 };
-actions.csvTemplate = () => download('template-guru.csv', 'username,nama,nip,password\r\nguru.contoh,Nama Guru Contoh,198001012005011001,rahasia123');
-changes.csvImport = async t => {
-  const file = t.files[0]; if (!file) return;
-  const txt = await file.text(); t.value = '';
-  const lines = txt.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
-  if (!lines.length) return toast('File CSV kosong.', 'err');
-  const sep = lines[0].includes(';') && !lines[0].includes(',') ? ';' : ',';
-  const rows = lines.map(l => l.split(sep).map(c => c.trim().replace(/^"|"$/g, '')));
-  if (/^username$/i.test(rows[0][0])) rows.shift();
-  busy(true); let ok = 0, skip = 0;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload = res; sc.onerror = () => rej(new Error('Pustaka Excel gagal dimuat. Periksa koneksi internet, atau gunakan file CSV.')); document.head.appendChild(sc);
+  });
+}
+actions.csvTemplate = async () => {
+  busy(true);
   try {
-    for (const [un, nama, nip, pass] of rows) {
-      const u = (un || '').toLowerCase();
-      if (!/^[a-z0-9._-]{3,30}$/.test(u) || !nama || !pass || pass.length < 6 || await DB.getUser(u)) { skip++; continue; }
-      await DB.saveUser(u, { username: u, nama, nip: nip || '', passHash: await hashPass(u, pass), aktif: true, role: 'guru', createdAt: ymd(new Date()) }); ok++;
-    }
+    await loadXlsx();
+    const ws = XLSX.utils.aoa_to_sheet([['username', 'nama', 'nip', 'password'], ['guru.contoh', 'Nama Guru Contoh, S.Pd', '198001012005011001', 'rahasia123'], ['contoh@sekolah.sch.id', 'Guru Dengan Email', '', 'rahasia123']]);
+    ['C2', 'C3', 'D2', 'D3'].forEach(c => { if (ws[c]) { ws[c].t = 's'; ws[c].z = '@'; } });   // NIP & password sebagai teks
+    ws['!cols'] = [{ wch: 28 }, { wch: 34 }, { wch: 22 }, { wch: 16 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Guru'); XLSX.writeFile(wb, 'template-guru.xlsx');
   } finally { busy(false); }
-  toast(`Impor selesai: ${ok} ditambahkan, ${skip} dilewati.`, ok ? 'ok' : 'err'); go('guru');
+};
+const splitCsv = (line, sep) => { const out = []; let cur = '', q = false; for (const ch of line) { if (ch === '"') q = !q; else if (ch === sep && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map(c => c.trim()); };
+async function readSheetRows(file) {
+  if (/\.xlsx?$/i.test(file.name)) {
+    await loadXlsx();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' }), ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '', blankrows: false }).map(r => r.map(c => String(c ?? '').trim()));
+  }
+  const lines = (await file.text()).replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return [];
+  const h = lines[0], sep = [';', '\t', ','].map(c => [c, h.split(c).length]).sort((a, b) => b[1] - a[1])[0][0];
+  return lines.map(l => splitCsv(l, sep));
+}
+changes.csvImport = async t => {
+  const file = t.files[0]; if (!file) return; t.value = '';
+  busy(true); let ok = 0; const skipped = [], adjusted = [], nipWarn = [];
+  try {
+    const rows = await readSheetRows(file);
+    if (!rows.length) throw new Error('File kosong.');
+    let ix = { un: 0, nama: 1, nip: 2, pass: 3 }, start = 0;
+    const hd = rows[0].map(c => c.toLowerCase());
+    if (hd.some(c => /^(username|user|nama)$/.test(c))) {   // baris judul: petakan kolom berdasarkan namanya
+      start = 1; const f = re => hd.findIndex(c => re.test(c));
+      ix = { un: f(/^(username|user)$/), nama: f(/^nama/), nip: f(/^nip/), pass: f(/^(password|kata ?sandi|sandi)$/) };
+      if (ix.un < 0 || ix.nama < 0 || ix.pass < 0) throw new Error('Judul kolom harus memuat: username, nama, nip (opsional), password.');
+    }
+    const seen = new Set();
+    for (let i = start; i < rows.length; i++) {
+      const r = rows[i], raw = r[ix.un] || '', nama = (r[ix.nama] || '').trim(), pass = r[ix.pass] || '';
+      let nip = ix.nip >= 0 ? (r[ix.nip] || '').trim() : '';
+      if (!raw && !nama) continue;
+      const u = normUser(raw), why = !USER_RE.test(u) ? 'username tidak valid' : !nama ? 'nama kosong' : pass.length < 6 ? 'password kurang dari 6 karakter' : seen.has(u) ? 'username ganda di file' : (await DB.getUser(u)) ? 'username sudah terdaftar' : '';
+      if (why) { skipped.push(`Baris ${i + 1} (${raw || '-'}): ${why}`); continue; }
+      seen.add(u);
+      if (/e\+/i.test(nip)) { nip = ''; nipWarn.push(nama); }
+      if (u !== raw.trim().toLowerCase()) adjusted.push(`${raw} → ${u}`);
+      await DB.saveUser(u, { username: u, nama, nip, passHash: await hashPass(u, pass), aktif: true, role: 'guru', createdAt: ymd(new Date()) }); ok++;
+    }
+  } catch (e) { busy(false); return toast(errMsg(e), 'err'); } finally { busy(false); }
+  go('guru');
+  const list = (title, a) => a.length ? `<div class="sm b" style="margin:12px 0 4px">${title} (${a.length})</div><div class="sm" style="max-height:160px;overflow:auto;background:#f8fafc;border-radius:12px;padding:8px 10px">${a.map(x => `<div>${esc(x)}</div>`).join('')}</div>` : '';
+  modal('Hasil Impor', `<div class="kv"><span>Berhasil ditambahkan</span><span><b>${ok}</b></span><span>Dilewati</span><span><b>${skipped.length}</b></span></div>
+    ${list('Dilewati', skipped)}${list('Username disesuaikan (gunakan ini untuk login)', adjusted)}${list('NIP terbaca sebagai angka ilmiah, isi manual di Data Guru', nipWarn)}`);
 };
 
 /* ---- Pengaturan ---- */
