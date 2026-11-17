@@ -343,6 +343,9 @@ const USER_RE = /^(?=.{3,60}$)[a-z0-9._-]+(@[a-z0-9._-]+)?$/;
 function download(name, text, type = 'text/csv;charset=utf-8') {
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + text], { type })); a.download = name; document.body.appendChild(a); a.click(); a.remove();
 }
+// potongan gaji (hanya untuk admin): poin tanpa keterangan x nilai rupiah per poin
+const potong = (poin, cfg) => Math.round((poin || 0) * (Number(cfg.potongPerPoin) || 0) * 100) / 100;
+const rp = n => 'Rp ' + Number(n || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 });
 const csvQ = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
 
 /* ---- Cetak (PDF lewat dialog cetak browser) dengan kop surat & tanda tangan ---- */
@@ -375,7 +378,7 @@ function printDoc(title, subtitle, bodyHtml) {
 const defaultCfg = () => ({
   modeAbsen: 'sekolah',
   jamMasukMulai: '06:00', jamMasukBatas: '07:15', jamMasukTutup: '10:00', toleransiMenit: 0,
-  jamPulangMulai: '14:30', jamPulangAkhir: '18:00', hariKerja: [1, 2, 3, 4, 5],
+  jamPulangMulai: '14:30', potongPerPoin: 1, jamPulangAkhir: '18:00', hariKerja: [1, 2, 3, 4, 5],
   lat: -6.175392, lng: 106.827153, radius: 100, namaLokasi: 'Lokasi Sekolah',
   poinPerMenit: 1, poinTelatMax: 225, poinTidakPulang: 225, poinAlpha: 450, bandingHari: 14, libur: [], liburOff: []
 });
@@ -464,8 +467,9 @@ function windowState(mode, cfg, now = new Date()) {
     if (m > toMin(cfg.jamMasukTutup)) return { open: false, msg: `Absen masuk ditutup pukul ${cfg.jamMasukTutup}.` };
     return { open: true, msg: `Batas tepat waktu pukul ${cfg.jamMasukBatas}${cfg.toleransiMenit ? ` (+${cfg.toleransiMenit} menit toleransi)` : ''}.` };
   }
+  if (m < toMin(cfg.jamPulangMulai)) return { open: false, msg: `Absen pulang dibuka pukul ${cfg.jamPulangMulai}.` };
   if (m > toMin(cfg.jamPulangAkhir)) return { open: false, msg: `Absen pulang ditutup pukul ${cfg.jamPulangAkhir}.` };
-  return { open: true, msg: m < toMin(cfg.jamPulangMulai) ? `Jam pulang resmi pukul ${cfg.jamPulangMulai}. Pulang sebelumnya tercatat "Pulang Cepat".` : 'Silakan absen pulang.' };
+  return { open: true, msg: 'Silakan absen pulang.' };
 }
 
 // Evaluasi satu guru pada satu tanggal. Mengembalikan null bila hari itu tidak dihitung.
@@ -986,7 +990,7 @@ PAGES.guru.home = async () => {
   else if (libur && !rec) cta = notice(`Hari ini libur: <b>${esc(libur.n)}</b>. Tidak perlu absen.`, 'info');
   else if (!kerja && !rec) cta = notice('Hari ini bukan hari kerja.', 'info');
   else if (!rec && !tutup) cta = `<button class="btn pri block lg" style="margin-bottom:14px" data-act="nav" data-p="absen">${ic('camera')} Absen Masuk Sekarang</button>`;
-  else if (!rec) cta = notice(`Absen masuk sudah ditutup (pukul ${esc(cfg.jamMasukTutup)}). Tanpa absen masuk Anda dikenai <b>${cfg.poinTelatMax} poin</b>, tetapi tetap dapat absen pulang.`) + `<button class="btn pri block lg" style="margin-bottom:14px" data-act="nav" data-p="absen">${ic('camera')} Absen Pulang</button>`;
+  else if (!rec) cta = notice(`Absen masuk sudah ditutup (pukul ${esc(cfg.jamMasukTutup)}). Absen pulang dibuka pukul <b>${esc(cfg.jamPulangMulai)}</b>. Tanpa absen masuk Anda dikenai <b>${cfg.poinTelatMax} poin</b>, tetapi tetap dapat absen pulang.`) + `<button class="btn pri block lg" style="margin-bottom:14px" data-act="nav" data-p="absen">${ic('camera')} Absen Pulang</button>`;
   else if (rec.masuk && !rec.pulang) cta = `<button class="btn pri block lg" style="margin-bottom:14px" data-act="nav" data-p="absen">${ic('camera')} Absen Pulang</button>`;
   else cta = notice('Absensi hari ini sudah lengkap. Terima kasih!', 'ok');
   const h = new Date().getHours(), sapa = h < 11 ? 'Selamat pagi' : h < 15 ? 'Selamat siang' : h < 18 ? 'Selamat sore' : 'Selamat malam';
@@ -1119,7 +1123,7 @@ actions.sendAbsen = async () => {
       await DB.createAbsensi(id, { username: u.username, nama: u.nama, tanggal: today, masuk: rec });
       if (late && !A.dinas) { poin = Math.min(Math.round(rec.terlambatMenit * cfg.poinPerMenit), cfg.poinTelatMax); ket = `Terlambat ${rec.terlambatMenit} menit`; }
     } else {
-      rec.status = mins < toMin(cfg.jamPulangMulai) ? 'Pulang Cepat' : 'Tepat Waktu';
+      rec.status = 'Tepat Waktu';
       if (A.tanpaMasuk) {
         if (cur) throw new Error('Data absensi sudah ada. Muat ulang halaman.');
         await DB.createPulangOnly(id, { username: u.username, nama: u.nama, tanggal: today, pulang: rec });
@@ -1282,7 +1286,7 @@ PAGES.guru.profil = async () => {
     <label class="btn s" style="cursor:pointer">${ic('camera')} Ganti foto<input type="file" accept="image/*" data-change="fotoPick" hidden></label></div></div>
   <div class="card pad"><h3 style="margin-bottom:8px">Jadwal &amp; Aturan Poin Tanpa Keterangan</h3>
     <div class="sm b" style="margin:4px 0">Jadwal absen</div>
-    <div class="kv"><span>Mode hari ini</span><span>${esc(MODE_LABEL[mode])}${mode === 'sekolah' ? ` · radius ${cfg.radius} m` : ' · lokasi tidak diperlukan'}</span><span>Absen masuk</span><span>${esc(cfg.jamMasukMulai)} – batas ${esc(cfg.jamMasukBatas)}${cfg.toleransiMenit ? ` (+${cfg.toleransiMenit} menit toleransi)` : ''}, ditutup ${esc(cfg.jamMasukTutup)}</span><span>Jam pulang</span><span>${esc(cfg.jamPulangMulai)} (ditutup ${esc(cfg.jamPulangAkhir)})</span><span>Hari kerja</span><span>${cfg.hariKerja.map(d => HARI[d].slice(0, 3)).join(', ')}</span></div>
+    <div class="kv"><span>Mode hari ini</span><span>${esc(MODE_LABEL[mode])}${mode === 'sekolah' ? ` · radius ${cfg.radius} m` : ' · lokasi tidak diperlukan'}</span><span>Absen masuk</span><span>${esc(cfg.jamMasukMulai)} – batas ${esc(cfg.jamMasukBatas)}${cfg.toleransiMenit ? ` (+${cfg.toleransiMenit} menit toleransi)` : ''}, ditutup ${esc(cfg.jamMasukTutup)}</span><span>Absen pulang</span><span>dibuka ${esc(cfg.jamPulangMulai)} (jam pulang), ditutup ${esc(cfg.jamPulangAkhir)}</span><span>Hari kerja</span><span>${cfg.hariKerja.map(d => HARI[d].slice(0, 3)).join(', ')}</span></div>
     <div class="sm b" style="margin:14px 0 4px">Aturan poin</div>
     <div class="kv"><span>Terlambat</span><span>${cfg.poinPerMenit} poin per menit, maks ${cfg.poinTelatMax}</span><span>Tidak absen pulang</span><span>${cfg.poinTidakPulang} poin</span><span>Tidak absen masuk</span><span>${cfg.poinTelatMax} poin (tetap bisa absen pulang)</span><span>Alpha</span><span>${cfg.poinAlpha} poin</span></div>
     <p class="mut sm">Poin dihitung per bulan. Izin, sakit, cuti, dan dinas luar yang disetujui admin, serta hari libur, tidak dikenai poin.</p></div>
@@ -1324,7 +1328,7 @@ function chartTopPoin(perGuru, n = 10) {
   const list = perGuru.filter(g => g.sum.poin > 0).sort((a, b) => b.sum.poin - a.sum.poin).slice(0, n);
   if (!list.length) return emptyBox('Belum ada poin tanpa keterangan pada periode ini.', 'chart');
   const max = list[0].sum.poin;
-  return `${legendHtml(STACK.map(([, t, c]) => [t, c]))}<div style="height:12px"></div>` + list.map(g => `<div class="hb"><div class="hb-h"><span>${esc(g.u.nama)}</span><b>${g.sum.poin} poin</b></div><div class="hb-bar" role="img" aria-label="${esc(g.u.nama)}: ${g.sum.poin} poin">${STACK.map(([k, t, c]) => g.sum[k] ? `<i title="${esc(t)}: ${g.sum[k]}" style="width:${g.sum[k] / max * 100}%;background:${c}"></i>` : '').join('')}</div></div>`).join('');
+  return `${legendHtml(STACK.map(([, t, c]) => [t, c]))}<div style="height:12px"></div>` + list.map(g => `<div class="hb"><div class="hb-h"><span>${esc(g.u.nama)}</span><b>${g.sum.poin} poin · ${rp(potong(g.sum.poin, cfgOrDefault()))}</b></div><div class="hb-bar" role="img" aria-label="${esc(g.u.nama)}: ${g.sum.poin} poin">${STACK.map(([k, t, c]) => g.sum[k] ? `<i title="${esc(t)}: ${g.sum[k]}" style="width:${g.sum[k] / max * 100}%;background:${c}"></i>` : '').join('')}</div></div>`).join('');
 }
 function chartDonut(parts) {
   const tot = parts.reduce((a, p) => a + p.v, 0);
@@ -1382,7 +1386,7 @@ PAGES.admin.dash = async () => {
   <div class="card pad"><div class="sec-h"><h3>Laporan Harian Guru Tidak Hadir</h3><button class="btn pri s" data-act="lapPrint">${ic('print')} Cetak PDF</button></div>
     <div style="max-width:240px"><label class="f" style="margin-top:0">Tanggal laporan</label><input class="inp" type="date" id="lapDate" value="${today}" max="${today}" data-change="lapDate"></div>
     <div id="lapOut" style="margin-top:12px"></div></div>
-  <div class="card pad"><div class="sec-h"><h3>Poin Tanpa Keterangan Terbanyak · ${esc(fmtBulan(ymOf(now)))}</h3><button class="btn s" data-act="nav" data-p="rekap">Lihat rekap</button></div>${chartTopPoin(mat.perGuru, 5)}</div>
+  <div class="card pad"><div class="sec-h"><h3>Poin Tanpa Keterangan Terbanyak · ${esc(fmtBulan(ymOf(now)))}</h3><button class="btn s" data-act="nav" data-p="rekap">Lihat rekap</button></div>${notice(`Total potongan gaji bulan ini: <b>${rp(potong(sumAll(mat.perGuru).poin, cfg))}</b> (${sumAll(mat.perGuru).poin || 0} poin × ${rp(cfg.potongPerPoin)})`, 'info')}${chartTopPoin(mat.perGuru, 5)}</div>
   <div class="card"><div class="pad" style="padding-bottom:4px"><h3>Absensi Hari Ini</h3></div>${S.dashRows.length ? S.dashRows.map((r, i) => `<div class="row tap" data-act="dashDetail" data-i="${i}">${avatar(r, 38)}<div class="g"><b>${esc(r.nama)}</b><span>Masuk ${esc(r.rec.masuk?.waktu || '—')}${r.rec.pulang ? ' · Pulang ' + esc(r.rec.pulang.waktu) : ''}${r.mode && r.mode !== 'sekolah' ? ' · ' + esc(MODE_LABEL[r.mode]) : ''}</span></div><div class="r">${chip(r.st)}${r.poin ? poinChip(r.poin) : ''}</div></div>`).join('') : emptyBox('Belum ada guru yang absen hari ini.', 'clock')}</div>`;
   await renderLaporan(today);
 };
@@ -1439,7 +1443,7 @@ async function renderLaporan(ds) {
   const absent = valid.filter(r => r.kat === 'alpha' || r.kat === 'belum'), izin = valid.filter(r => !r.rec && (r.kat === 'izin' || r.kat === 'dinas')), hadir = valid.filter(r => r.rec || r.rev).length;
   S.lap = { ds, absent, izin, hadir, total: guru.length, nonKerja: !valid.length };
   if (!valid.length) { out.innerHTML = notice('Tanggal ini bukan hari kerja atau hari libur, tidak ada data kehadiran.', 'info'); return; }
-  const row = r => `<div class="row">${avatar(r, 36)}<div class="g"><b>${esc(r.nama)}</b><span>${esc(r.nip || r.username)}${r.alasan ? ' · ' + esc(r.alasan) : ''}</span></div><div class="r">${chip(r.kat === 'belum' ? 'Belum Absen' : stText(r))}${r.poin ? poinChip(r.poin) : ''}</div></div>`;
+  const row = r => `<div class="row">${avatar(r, 36)}<div class="g"><b>${esc(r.nama)}</b><span>${esc(r.nip || r.username)}${r.alasan ? ' · ' + esc(r.alasan) : ''}</span></div><div class="r">${chip(r.kat === 'belum' ? 'Belum Absen' : stText(r))}${r.poin ? poinChip(r.poin) + `<span class="chip err">${rp(potong(r.poin, cfg))}</span>` : ''}</div></div>`;
   out.innerHTML = `<div class="sm mut" style="margin-bottom:8px">${esc(fmtTanggal(ds))} · Hadir ${hadir} · Tidak hadir ${absent.length} · Izin/Dinas ${izin.length} dari ${guru.length} guru</div>
   <div class="card" style="box-shadow:none;margin-bottom:10px">${absent.length ? absent.map(row).join('') : emptyBox('Semua guru hadir atau berizin.', 'check')}</div>
   ${izin.length ? `<div class="sm b" style="margin:8px 0 6px">Izin / Sakit / Cuti / Dinas Luar</div><div class="card" style="box-shadow:none;margin:0">${izin.map(row).join('')}</div>` : ''}`;
@@ -1448,10 +1452,11 @@ changes.lapDate = t => renderLaporan(t.value);
 actions.lapPrint = () => {
   const L = S.lap; if (!L) return toast('Pilih tanggal laporan yang valid.', 'err');
   if (L.nonKerja) return toast('Tidak ada data kehadiran pada tanggal ini.', 'err');
-  const a = L.absent.map((r, i) => [i + 1, r.nama, r.nip || r.username, r.kat === 'belum' ? 'Belum absen' : 'Alpha (tanpa keterangan)', r.poin]);
+  const a = L.absent.map((r, i) => [i + 1, r.nama, r.nip || r.username, r.kat === 'belum' ? 'Belum absen' : 'Alpha (tanpa keterangan)', r.poin, rp(potong(r.poin, cfgOrDefault()))]);
   const b = L.izin.map((r, i) => [i + 1, r.nama, r.nip || r.username, r.izin, r.alasan || '-']);
   printDoc('Laporan Harian Guru Tidak Hadir', fmtTanggal(L.ds), `<p class="pr-sum">Total guru aktif: <b>${L.total}</b> &nbsp;·&nbsp; Hadir: <b>${L.hadir}</b> &nbsp;·&nbsp; Tidak hadir: <b>${L.absent.length}</b> &nbsp;·&nbsp; Izin/Sakit/Cuti/Dinas Luar: <b>${L.izin.length}</b></p>
-  <h3>A. Guru Tidak Hadir</h3>${printTable([['No', 1], ['Nama Guru'], ['NIP / Username'], ['Keterangan'], ['Poin', 1]], a)}
+  <h3>A. Guru Tidak Hadir</h3>${printTable([['No', 1], ['Nama Guru'], ['NIP / Username'], ['Keterangan'], ['Poin', 1], ['Potongan Gaji', 1]], a)}
+  <p class="pr-sum">Total potongan gaji hari ini: <b>${rp(L.absent.reduce((t, r) => t + potong(r.poin, cfgOrDefault()), 0))}</b></p>
   <h3>B. Izin / Sakit / Cuti / Dinas Luar</h3>${printTable([['No', 1], ['Nama Guru'], ['NIP / Username'], ['Jenis'], ['Alasan']], b)}`);
 };
 
@@ -1480,27 +1485,27 @@ async function loadRekap() {
   S.rekapData = buildMatrix(users, abs, izin, r.from, r.to, bds);
   drawRekap();
 }
-const sumCols = [['Guru'], ['Hadir', 1], ['Tepat', 1], ['Terlambat', 1], ['Menit', 1], ['Tdk pulang', 1], ['Tdk masuk', 1], ['Alpha', 1], ['Izin', 1], ['Dinas', 1], ['Poin', 1]];
-const sumRow = g => [g.u.nama, g.sum.hadir, g.sum.tepat, g.sum.telat, g.sum.menit, g.sum.tdkPulang, g.sum.tanpaMasuk, g.sum.alpha, g.sum.izin, g.sum.dinas, g.sum.poin];
+const sumCols = [['Guru'], ['Hadir', 1], ['Tepat', 1], ['Terlambat', 1], ['Menit', 1], ['Tdk pulang', 1], ['Tdk masuk', 1], ['Alpha', 1], ['Izin', 1], ['Dinas', 1], ['Poin', 1], ['Potongan (Rp)', 1]];
+const sumRow = (g, raw) => [g.u.nama, g.sum.hadir, g.sum.tepat, g.sum.telat, g.sum.menit, g.sum.tdkPulang, g.sum.tanpaMasuk, g.sum.alpha, g.sum.izin, g.sum.dinas, g.sum.poin, raw ? potong(g.sum.poin, cfgOrDefault()) : rp(potong(g.sum.poin, cfgOrDefault()))];
 function drawRekap() {
   const r = S.rekap, mat = S.rekapData, out = $('#rekapOut'); if (!out || !mat) return;
   const over = dateRange(r.from, r.to, 400).length > 93, bar = over ? notice('Rentang dibatasi 93 hari pertama agar tetap cepat.', 'info') : '';
   if (r.tab === 'ringkas') {
     const tot = sumAll(mat.perGuru), list = [...mat.perGuru].sort((a, b) => b.sum.poin - a.sum.poin), withPoin = list.filter(g => g.sum.poin > 0).length;
     out.innerHTML = `${bar}<div class="sm mut" style="margin-bottom:10px">${esc(fmtPendek(r.from))} – ${esc(fmtPendek(r.to))} · ${mat.perGuru.length} guru</div>
-    <div class="stats"><div class="card stat"><b>${tot.poin || 0}</b><span>Total poin tanpa keterangan</span></div><div class="card stat"><b>${withPoin}</b><span>Guru memiliki poin</span></div><div class="card stat"><b>${tot.alpha || 0}</b><span>Total alpha (hari)</span></div><div class="card stat"><b>${tot.menit || 0}</b><span>Total menit terlambat</span></div></div>
+    <div class="stats"><div class="card stat"><b>${tot.poin || 0}</b><span>Total poin tanpa keterangan</span></div><div class="card stat"><b>${rp(potong(tot.poin, cfgOrDefault()))}</b><span>Total potongan gaji</span></div><div class="card stat"><b>${withPoin}</b><span>Guru memiliki poin</span></div><div class="card stat"><b>${tot.alpha || 0}</b><span>Total alpha (hari)</span></div><div class="card stat"><b>${tot.menit || 0}</b><span>Total menit terlambat</span></div></div>
     <div class="chartgrid two"><div class="card pad"><div class="sec-h"><h3>Guru dengan Poin Terbanyak</h3></div>${chartTopPoin(mat.perGuru, 10)}</div>
     <div class="card pad"><div class="sec-h"><h3>Komposisi Kehadiran</h3></div>${chartDonut(donutParts(tot))}</div></div>
     <div class="card pad"><div class="sec-h"><h3>Tren Kehadiran Harian</h3></div>${chartDaily(mat)}</div>
     <div class="sec-h"><h3>Rekap per Guru</h3><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn s" data-act="rekapCsv">${ic('download')} CSV</button><button class="btn pri s" data-act="rekapPrint">${ic('print')} Cetak PDF</button></div></div>
-    <div class="card tblw"><table class="tbl"><thead><tr>${sumCols.map(c => `<th>${c[0]}</th>`).join('')}</tr></thead><tbody>${list.length ? list.map(g => { const x = sumRow(g); return `<tr>${x.map((c, i) => i === 0 ? `<td><b>${esc(c)}</b></td>` : (i === x.length - 1 ? `<td class="pt" style="color:${c ? 'var(--err)' : 'var(--ok)'}">${c}</td>` : `<td>${c}</td>`)).join('')}</tr>`; }).join('') : '<tr><td colspan="11" class="center mut">Tidak ada data.</td></tr>'}</tbody></table></div>`;
+    <div class="card tblw"><table class="tbl"><thead><tr>${sumCols.map(c => `<th>${c[0]}</th>`).join('')}</tr></thead><tbody>${list.length ? list.map(g => { const x = sumRow(g); return `<tr>${x.map((c, i) => i === 0 ? `<td><b>${esc(c)}</b></td>` : (i === x.length - 2 ? `<td class="pt" style="color:${c ? 'var(--err)' : 'var(--ok)'}">${c}</td>` : `<td>${c}</td>`)).join('')}</tr>`; }).join('') : '<tr><td colspan="11" class="center mut">Tidak ada data.</td></tr>'}</tbody></table></div>`;
     return;
   }
   const all = mat.perGuru.flatMap(g => g.rows).filter(x => x.kat !== 'belum');
   const f = r.status, rows = all.filter(x => f === 'telat' ? x.st === 'Terlambat' : f === 'alpha' ? x.kat === 'alpha' : f === 'pelanggaran' ? x.poin > 0 : f === 'izin' ? (!x.rec && (x.kat === 'izin' || x.kat === 'dinas')) : true).sort((a, b) => b.ds.localeCompare(a.ds) || a.nama.localeCompare(b.nama));
   S.rekapRows = rows; const shown = rows.slice(0, r.limit);
   out.innerHTML = `${bar}<div style="display:flex;gap:10px;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap"><select class="inp" style="max-width:240px" data-change="rekapStatus">${REKAP_STATUS.map(([k, n]) => `<option value="${k}" ${f === k ? 'selected' : ''}>${n}</option>`).join('')}</select><div style="display:flex;gap:8px"><button class="btn s" data-act="rekapCsv" ${rows.length ? '' : 'disabled'}>${ic('download')} CSV</button><button class="btn pri s" data-act="rekapPrint" ${rows.length ? '' : 'disabled'}>${ic('print')} Cetak PDF</button></div></div>
-  <div class="mut sm" style="margin-bottom:8px">${rows.length} data · total ${rows.reduce((a, x) => a + x.poin, 0)} poin</div>
+  <div class="mut sm" style="margin-bottom:8px">${rows.length} data · total ${rows.reduce((a, x) => a + x.poin, 0)} poin · potongan ${rp(potong(rows.reduce((a, x) => a + x.poin, 0), cfgOrDefault()))}</div>
   <div class="card">${shown.length ? shown.map((x, i) => `<div class="row tap" data-act="rekapDetail" data-i="${i}">${x.rec?.masuk?.foto ? `<img class="thumb" src="${esc(x.rec.masuk.foto)}" alt="">` : avatar(x, 44)}<div class="g"><b>${esc(x.nama)}</b><span>${esc(fmtPendek(x.ds))}${x.rec ? ` · Masuk ${esc(x.rec.masuk?.waktu || '—')} · Pulang ${esc(x.rec.pulang?.waktu || '—')}` : ''}${x.telat ? ` · +${x.telat} mnt` : ''}</span></div><div class="r">${chip(stText(x))}<span class="chip ${x.poin ? 'err' : 'ok'}">${x.poin} poin</span></div></div>`).join('') : emptyBox('Tidak ada data pada filter ini.', 'list')}</div>
   ${rows.length > shown.length ? `<button class="btn block" data-act="rekapMore">Tampilkan lebih banyak (${rows.length - shown.length} lagi)</button>` : ''}`;
 }
@@ -1517,10 +1522,10 @@ actions.rekapCsv = () => {
   const r = S.rekap, mat = S.rekapData; if (!mat) return;
   if (r.tab === 'ringkas') {
     const list = [...mat.perGuru].sort((a, b) => b.sum.poin - a.sum.poin);
-    download(`rekap-guru_${r.from}_${r.to}.csv`, [sumCols.map(c => csvQ(c[0])).join(';'), ...list.map(g => sumRow(g).map(csvQ).join(';'))].join('\r\n'));
+    download(`rekap-guru_${r.from}_${r.to}.csv`, [sumCols.map(c => csvQ(c[0])).join(';'), ...list.map(g => sumRow(g, true).map(csvQ).join(';'))].join('\r\n'));
   } else {
-    const hd = ['Tanggal', 'Username', 'Nama', 'Status', 'Jam Masuk', 'Jam Pulang', 'Menit Terlambat', 'Mode', 'Poin Terlambat', 'Poin Tidak Pulang', 'Poin Tidak Masuk', 'Poin Alpha', 'Total Poin'];
-    const lines = (S.rekapRows || []).map(x => [x.ds, x.username, x.nama, stText(x), x.rec?.masuk?.waktu, x.rec?.pulang?.waktu, x.telat, x.mode ? MODE_LABEL[x.mode] : '', x.pTelat, x.pPulang, x.pMasuk, x.pAlpha, x.poin].map(csvQ).join(';'));
+    const hd = ['Tanggal', 'Username', 'Nama', 'Status', 'Jam Masuk', 'Jam Pulang', 'Menit Terlambat', 'Mode', 'Poin Terlambat', 'Poin Tidak Pulang', 'Poin Tidak Masuk', 'Poin Alpha', 'Total Poin', 'Potongan (Rp)'];
+    const lines = (S.rekapRows || []).map(x => [x.ds, x.username, x.nama, stText(x), x.rec?.masuk?.waktu, x.rec?.pulang?.waktu, x.telat, x.mode ? MODE_LABEL[x.mode] : '', x.pTelat, x.pPulang, x.pMasuk, x.pAlpha, x.poin, potong(x.poin, cfgOrDefault())].map(csvQ).join(';'));
     download(`rincian-absensi_${r.from}_${r.to}.csv`, [hd.map(csvQ).join(';'), ...lines].join('\r\n'));
   }
 };
@@ -1529,10 +1534,10 @@ actions.rekapPrint = () => {
   const sub = `${fmtPendek(r.from)} s.d. ${fmtPendek(r.to)}`;
   if (r.tab === 'ringkas') {
     const list = [...mat.perGuru].sort((a, b) => b.sum.poin - a.sum.poin), tot = sumAll(mat.perGuru);
-    printDoc('Rekap Kehadiran & Poin Tanpa Keterangan Guru', sub, `<p class="pr-sum">Jumlah guru: <b>${list.length}</b> &nbsp;·&nbsp; Total poin: <b>${tot.poin || 0}</b> &nbsp;·&nbsp; Total alpha: <b>${tot.alpha || 0}</b> hari &nbsp;·&nbsp; Total menit terlambat: <b>${tot.menit || 0}</b></p>${printTable([['No', 1], ...sumCols.map(c => [c[0], c[1]])], list.map((g, i) => [i + 1, ...sumRow(g)]))}`);
+    printDoc('Rekap Kehadiran & Poin Tanpa Keterangan Guru', sub, `<p class="pr-sum">Jumlah guru: <b>${list.length}</b> &nbsp;·&nbsp; Total poin: <b>${tot.poin || 0}</b> &nbsp;·&nbsp; Total potongan gaji: <b>${rp(potong(tot.poin, cfgOrDefault()))}</b> &nbsp;·&nbsp; Total alpha: <b>${tot.alpha || 0}</b> hari &nbsp;·&nbsp; Total menit terlambat: <b>${tot.menit || 0}</b></p>${printTable([['No', 1], ...sumCols.map(c => [c[0], c[1]])], list.map((g, i) => [i + 1, ...sumRow(g)]))}`);
   } else {
     const rows = S.rekapRows || [];
-    printDoc('Rincian Absensi & Poin Tanpa Keterangan Guru', sub, printTable([['Tanggal'], ['Nama Guru'], ['Status'], ['Masuk'], ['Pulang'], ['Menit', 1], ['Poin', 1]], rows.map(x => [fmtPendek(x.ds), x.nama, stText(x), x.rec?.masuk?.waktu || '-', x.rec?.pulang?.waktu || '-', x.telat, x.poin])));
+    printDoc('Rincian Absensi & Poin Tanpa Keterangan Guru', sub, printTable([['Tanggal'], ['Nama Guru'], ['Status'], ['Masuk'], ['Pulang'], ['Menit', 1], ['Poin', 1], ['Potongan (Rp)', 1]], rows.map(x => [fmtPendek(x.ds), x.nama, stText(x), x.rec?.masuk?.waktu || '-', x.rec?.pulang?.waktu || '-', x.telat, x.poin, rp(potong(x.poin, cfgOrDefault()))])) + `<p class="pr-sum">Total poin: <b>${rows.reduce((a, x) => a + x.poin, 0)}</b> &nbsp;·&nbsp; Total potongan gaji: <b>${rp(potong(rows.reduce((a, x) => a + x.poin, 0), cfgOrDefault()))}</b></p>`);
   }
 };
 
@@ -1738,8 +1743,8 @@ function setJam() {
     <div class="grid2"><div><label class="f">Absen masuk ditutup</label><input class="inp" type="time" name="masukTutup" value="${c.jamMasukTutup}" required></div><div><label class="f">Toleransi terlambat (menit)</label><input class="inp" type="number" name="toleransi" min="0" max="120" value="${c.toleransiMenit}" required></div></div>
     <p class="mut sm" style="margin-top:6px">Setelah jam penutupan, absen masuk terkunci. Guru yang tidak absen masuk tetap dapat absen pulang, tetapi dikenai poin (lihat tab Poin Tanpa Keterangan). Tanpa absen masuk dan pulang sampai akhir hari = alpha.</p>
     <h3 style="margin-top:20px">Absen Pulang</h3>
-    <div class="grid2"><div><label class="f">Jam pulang resmi</label><input class="inp" type="time" name="pulangMulai" value="${c.jamPulangMulai}" required></div><div><label class="f">Absen pulang ditutup</label><input class="inp" type="time" name="pulangAkhir" value="${c.jamPulangAkhir}" required></div></div>
-    <p class="mut sm" style="margin-top:6px">Pulang sebelum jam pulang resmi tercatat "Pulang Cepat" (tanpa poin). Setelah jam penutupan, guru yang belum absen pulang dikenai poin.</p>
+    <div class="grid2"><div><label class="f">Absen pulang dibuka (jam pulang)</label><input class="inp" type="time" name="pulangMulai" value="${c.jamPulangMulai}" required></div><div><label class="f">Absen pulang ditutup</label><input class="inp" type="time" name="pulangAkhir" value="${c.jamPulangAkhir}" required></div></div>
+    <p class="mut sm" style="margin-top:6px">Setelah absen masuk ditutup, absensi terkunci sampai jam absen pulang dibuka. Setelah jam penutupan pulang, guru yang belum absen pulang dikenai poin.</p>
     <h3 style="margin-top:20px">Hari Kerja</h3>
     <div class="days" style="margin-top:8px">${order.map(d => `<label><input type="checkbox" name="hari" value="${d}" ${c.hariKerja.includes(d) ? 'checked' : ''}> ${HARI[d]}</label>`).join('')}</div>
     <button class="btn pri block lg" style="margin-top:20px">${ic('check')} Simpan Jam Absen</button></form></div>`;
@@ -1747,7 +1752,7 @@ function setJam() {
 forms.saveJam = async f => {
   const a = f.masukMulai.value, b = f.masukBatas.value, t = f.masukTutup.value, c = f.pulangMulai.value, d = f.pulangAkhir.value;
   const hari = $$('input[name=hari]:checked', f).map(x => Number(x.value));
-  if (!(a < b && b <= t && t < d && c < d)) return toast('Urutan jam harus: dibuka < batas tepat waktu ≤ ditutup < pulang ditutup, dan jam pulang resmi < pulang ditutup.', 'err');
+  if (!(a < b && b <= t && t <= c && c < d)) return toast('Urutan jam harus: masuk dibuka < batas tepat waktu ≤ masuk ditutup ≤ pulang dibuka < pulang ditutup.', 'err');
   if (!hari.length) return toast('Pilih minimal satu hari kerja.', 'err');
   busy(true);
   try { await saveCfgPart({ jamMasukMulai: a, jamMasukBatas: b, jamMasukTutup: t, toleransiMenit: Number(f.toleransi.value) || 0, jamPulangMulai: c, jamPulangAkhir: d, hariKerja: hari }); } finally { busy(false); }
@@ -1774,11 +1779,13 @@ function setPoin() {
     <p class="mut sm" style="margin-top:4px">Contoh: terlambat 350 menit tetap dikenai maksimal ${c.poinTelatMax} poin. Guru yang tidak absen masuk tetapi absen pulang juga dikenai poin sebesar nilai maksimal ini.</p>
     <div class="grid2"><div><label class="f">Tidak absen pulang</label><input class="inp" type="number" name="tdkPulang" min="0" value="${c.poinTidakPulang}" required></div><div><label class="f">Alpha (tidak absen sama sekali)</label><input class="inp" type="number" name="alpha" min="0" value="${c.poinAlpha}" required></div></div>
     <p class="mut sm" style="margin-top:4px">Izin, sakit, cuti, dan dinas luar yang disetujui tidak dikenai poin. Perubahan aturan berlaku untuk seluruh data bulan berjalan dan sebelumnya karena poin dihitung ulang dari data absensi.</p>
+    <h3 style="margin-top:20px">Potongan Gaji</h3><label class="f">Potongan per 1 poin tanpa keterangan (Rp)</label><input class="inp" type="number" name="potong" min="0" step="any" value="${c.potongPerPoin}" required>
+    <p class="mut sm" style="margin-top:4px">Contoh: 1 poin = 1 menit terlambat; bila diisi 1000, terlambat 15 menit = potongan ${rp(15 * 1000)}. Nilai ini hanya tampil di menu admin (dashboard, rekap, dan cetak PDF), tidak terlihat oleh guru.</p>
     <h3 style="margin-top:20px">Klaim Banding</h3><label class="f">Batas pengajuan banding (hari setelah tanggal kejadian)</label><input class="inp" type="number" name="bandingHari" min="1" max="60" value="${c.bandingHari}" required>
     <button class="btn pri block lg" style="margin-top:16px">${ic('check')} Simpan Aturan Poin</button></form></div>`;
 }
 forms.savePoin = async f => {
-  const n = { poinPerMenit: Number(f.perMenit.value), poinTelatMax: Number(f.telatMax.value), poinTidakPulang: Number(f.tdkPulang.value), poinAlpha: Number(f.alpha.value), bandingHari: Math.round(Number(f.bandingHari.value)) };
+  const n = { poinPerMenit: Number(f.perMenit.value), poinTelatMax: Number(f.telatMax.value), poinTidakPulang: Number(f.tdkPulang.value), poinAlpha: Number(f.alpha.value), bandingHari: Math.round(Number(f.bandingHari.value)), potongPerPoin: Number(f.potong.value) };
   if (Object.values(n).some(x => !isFinite(x) || x < 0)) return toast('Nilai poin tidak valid.', 'err');
   busy(true); try { await saveCfgPart(n); } finally { busy(false); }
   toast('Aturan poin disimpan.');
